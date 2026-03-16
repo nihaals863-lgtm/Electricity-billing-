@@ -26,6 +26,7 @@ app.use(cors({
     'https://electricity-billing.kiaantechnology.com',
     'https://electricity-billing-production.up.railway.app',
     'https://electricity-billing-production-4c58.up.railway.app',
+    'https://electricity-billing-new.netlify.app'.
   ],
   credentials: true
 }));

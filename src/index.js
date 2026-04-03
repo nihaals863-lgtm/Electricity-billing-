@@ -4,7 +4,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const dotenv = require('dotenv');
 
-// 💡 Load env vars FIRST
+// 💡 Load env FIRST
 dotenv.config();
 
 const modbusEngine = require('./services/modbusEngine');
@@ -23,9 +23,11 @@ const reportRoutes = require('./routes/report.routes');
 const app = express();
 const server = http.createServer(app);
 
-// ✅ CORS Config
+// ======================================================
+// ✅ CORS CONFIG (FIXED FOR PRODUCTION + RAILWAY)
+// ======================================================
+
 const FRONTEND_URLS = [
-  process.env.FRONTEND_URL || 'http://localhost:5173',
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:5175',
@@ -34,51 +36,55 @@ const FRONTEND_URLS = [
   'https://electricity-billing-production-4c58.up.railway.app'
 ];
 
-// ✅ Socket.io
-const io = new Server(server, {
-  cors: {
-    origin: FRONTEND_URLS,
-    methods: ["GET", "POST"],
-    credentials: true
-  }
-});
-
-// ✅ Middleware
+// 🔥 Dynamic CORS (IMPORTANT)
 app.use(cors({
-  origin: FRONTEND_URLS,
-  credentials: true
+  origin: function (origin, callback) {
+    // allow requests with no origin (like Postman)
+    if (!origin) return callback(null, true);
+
+    if (FRONTEND_URLS.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log("❌ CORS BLOCKED:", origin);
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }));
+
+// ✅ VERY IMPORTANT (Preflight fix)
+app.options('*', cors());
+
+// ======================================================
+// ✅ MIDDLEWARE
+// ======================================================
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ✅ Debug logger
+// Debug logger
 app.use((req, res, next) => {
-  if (process.env.NODE_ENV !== 'test') {
-    console.log(`🌐 [INBOUND] ${req.method} ${req.originalUrl} - Host: ${req.get('host')}`);
-  }
+  console.log(`🌐 ${req.method} ${req.originalUrl} | Origin: ${req.headers.origin}`);
   next();
 });
 
-
 // ======================================================
-// ✅ HEALTHCHECK ROUTES (VERY IMPORTANT - KEEP AT TOP)
+// ✅ HEALTH ROUTES (Railway ke liye important)
 // ======================================================
 
 app.get('/', (req, res) => {
-  res.status(200).send('PowerBill Real-Time API is running...');
+  res.status(200).send('PowerBill API Running 🚀');
 });
 
 app.get('/health', (req, res) => {
   res.status(200).send('OK');
 });
 
-
 // ======================================================
 // ✅ API ROUTES
 // ======================================================
-
-console.log('🛠️ Initializing Master API Router at /api...');
 
 const apiRouter = express.Router();
 
@@ -95,50 +101,51 @@ apiRouter.use('/reports', reportRoutes);
 
 app.use('/api', apiRouter);
 
-console.log('✅ All API routes registered successfully');
-
+console.log('✅ API routes loaded');
 
 // ======================================================
 // ✅ SOCKET.IO
 // ======================================================
 
-io.on('connection', (socket) => {
-  console.log('🔌 Client connected:', socket.id);
-
-  socket.on('disconnect', () => {
-    console.log('❌ Client disconnected:', socket.id);
-  });
+const io = new Server(server, {
+  cors: {
+    origin: FRONTEND_URLS,
+    methods: ["GET", "POST"],
+    credentials: true
+  }
 });
 
+io.on('connection', (socket) => {
+  console.log('🔌 Socket connected:', socket.id);
+
+  socket.on('disconnect', () => {
+    console.log('❌ Socket disconnected:', socket.id);
+  });
+});
 
 // ======================================================
 // ✅ ERROR HANDLER
 // ======================================================
 
 app.use((err, req, res, next) => {
-  console.error('💥 UNHANDLED ERROR:', err.stack);
+  console.error('💥 ERROR:', err.message);
+
   res.status(500).json({
     success: false,
-    message: 'Internal Server Error',
-    error: err.message
+    message: err.message || 'Internal Server Error'
   });
 });
 
-
 // ======================================================
-// ❗ CATCH-ALL (MUST BE LAST)
+// ❗ 404 HANDLER (LAST)
 // ======================================================
 
 app.use('*', (req, res) => {
-  const msg = `[API_ERROR] ${req.method} ${req.originalUrl} - Route NOT defined`;
-  console.error(msg);
-
   res.status(404).json({
     success: false,
-    message: msg
+    message: `Route not found: ${req.originalUrl}`
   });
 });
-
 
 // ======================================================
 // ✅ START SERVER
@@ -147,21 +154,12 @@ app.use('*', (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 server.listen(PORT, '0.0.0.0', async () => {
-  console.log(`\n🚀 SERVER RUNNING 🚀`);
-  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  console.log(`MODE: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`PORT: ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 
-  const dbUrl = process.env.DATABASE_URL || '';
-  console.log(`DB: ${dbUrl ? 'Connected (hidden)' : 'Not Defined'}`);
-
-  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
-
-  // ✅ Initialize Modbus safely (DON'T CRASH APP)
   try {
     await modbusEngine.init(io);
-    console.log('⚡ Modbus Engine initialized');
+    console.log('⚡ Modbus initialized');
   } catch (err) {
-    console.error('❌ Modbus init failed:', err.message);
+    console.log('❌ Modbus failed:', err.message);
   }
 });

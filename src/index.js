@@ -128,6 +128,7 @@ apiRouter.use('/notifications', notificationRoutes);
 apiRouter.use('/meters', meterRoutes);
 apiRouter.use('/reports', reportRoutes);
 
+// ✅ 4. API Routes
 app.use('/api', apiRouter);
 
 console.log('✅ API routes loaded');

@@ -23,11 +23,9 @@ const app = express();
 const server = http.createServer(app);
 
 // ======================================================
-// ✅ CORS CONFIG (FIXED FOR PRODUCTION + RAILWAY)
+// ✅ 1. CORS CONFIGURATION
 // ======================================================
 
-
-
 const FRONTEND_URLS = [
   'http://localhost:5173',
   'http://localhost:5174',
@@ -37,33 +35,17 @@ const FRONTEND_URLS = [
   'https://electricity-billing-production.up.railway.app',
   'https://electricity-billing-production-4c58.up.railway.app'
 ];
-
-
-
-{/*
-const FRONTEND_URLS = [
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://localhost:5175',
-  'http://127.0.0.1:5173',
-  'https://electricity-billing.kiaantechnology.com',
-  'https://electricity-billing-production.up.railway.app',
-  'https://electricity-billing-production-4c58.up.railway.app'
-];
-
-*/}
-
-
 
 app.use(cors({
   origin: function (origin, callback) {
-    // 1. Allow Request with no origin (like Postman)
+    // allow requests with no origin (like Postman)
     if (!origin) return callback(null, true);
-    // 2. Exact match or Pattern match (Localhost/Railway)
+
     const isAllowed = FRONTEND_URLS.includes(origin) || 
                      origin.startsWith('http://localhost') || 
                      origin.startsWith('http://127.0.0.1') || 
                      origin.endsWith('.railway.app');
+
     if (isAllowed) {
       callback(null, true);
     } else {
@@ -75,54 +57,19 @@ app.use(cors({
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"]
 }));
-{/*
 
-app.use(cors({
-  origin: function (origin, callback) {
-    // 1. Allow Request with no origin (like Postman or mobile apps)
-    if (!origin) return callback(null, true);
-
-    // 2. Exact match check
-    if (FRONTEND_URLS.includes(origin)) {
-      return callback(null, true);
-    }
-
-    // 3. Pattern match check for localhost and Railway
-    const isLocal = origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1');
-    const isRailway = origin.endsWith('.railway.app');
-
-    if (isLocal || isRailway) {
-      return callback(null, true);
-    }
-
-    // 4. Fallback: Block unknown origins
-    console.error("❌ CORS ERROR: Request from origin", origin, "is blocked.");
-    return callback(new Error("Not allowed by CORS"), false);
-  },
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"]
-}));
-
-
-*/}
-
-
-
-// ✅ VERY IMPORTANT (Preflight fix)
+// ✅ 2. PREFLIGHT & EXTRA SAFETY HEADERS
 app.options('*', cors());
 
-// 🔥 EXTRA SAFETY HEADERS (As requested)
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (FRONTEND_URLS.includes(origin) || (origin && (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')))) {
+  if (origin && (FRONTEND_URLS.includes(origin) || origin.startsWith('http://localhost') || origin.endsWith('.railway.app'))) {
     res.header("Access-Control-Allow-Origin", origin);
   }
   res.header("Access-Control-Allow-Credentials", "true");
   res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
   
-  // Handle preflight
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -130,7 +77,7 @@ app.use((req, res, next) => {
 });
 
 // ======================================================
-// ✅ MIDDLEWARE
+// ✅ 3. MIDDLEWARE
 // ======================================================
 
 app.use(express.json());
@@ -142,24 +89,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// ======================================================
-// ✅ HEALTH ROUTES (Railway ke liye important)
-// ======================================================
-
-app.get('/', (req, res) => {
-  res.status(200).send('PowerBill API Running 🚀');
-});
-
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
-});
+// Health Checks
+app.get('/', (req, res) => res.status(200).send('PowerBill API Running 🚀'));
+app.get('/health', (req, res) => res.status(200).send('OK'));
 
 // ======================================================
-// ✅ API ROUTES
+// ✅ 4. API ROUTES
 // ======================================================
 
 const apiRouter = express.Router();
-
 apiRouter.use('/auth', authRoutes);
 apiRouter.use('/consumers', consumerRoutes);
 apiRouter.use('/bills', billRoutes);
@@ -171,13 +109,10 @@ apiRouter.use('/notifications', notificationRoutes);
 apiRouter.use('/meters', meterRoutes);
 apiRouter.use('/reports', reportRoutes);
 
-// ✅ 4. API Routes
 app.use('/api', apiRouter);
 
-console.log('✅ API routes loaded');
-
 // ======================================================
-// ✅ SOCKET.IO
+// ✅ 5. SOCKET.IO
 // ======================================================
 
 const io = new Server(server, {
@@ -190,45 +125,30 @@ const io = new Server(server, {
 
 io.on('connection', (socket) => {
   console.log('🔌 Socket connected:', socket.id);
-
-  socket.on('disconnect', () => {
-    console.log('❌ Socket disconnected:', socket.id);
-  });
+  socket.on('disconnect', () => console.log('❌ Socket disconnected:', socket.id));
 });
 
 // ======================================================
-// ✅ ERROR HANDLER
+// ✅ 6. ERROR HANDLING
 // ======================================================
 
 app.use((err, req, res, next) => {
   console.error('💥 ERROR:', err.message);
-
-  res.status(500).json({
-    success: false,
-    message: err.message || 'Internal Server Error'
-  });
+  res.status(500).json({ success: false, message: err.message || 'Internal Server Error' });
 });
-
-// ======================================================
-// ❗ 404 HANDLER (LAST)
-// ======================================================
 
 app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    message: `Route not found: ${req.originalUrl}`
-  });
+  res.status(404).json({ success: false, message: `Route not found: ${req.originalUrl}` });
 });
 
 // ======================================================
-// ✅ START SERVER
+// ✅ 7. START SERVER
 // ======================================================
 
 const PORT = process.env.PORT || 5000;
 
 server.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 Server running on port ${PORT}`);
-
   try {
     await modbusEngine.init(io);
     console.log('⚡ Modbus initialized');

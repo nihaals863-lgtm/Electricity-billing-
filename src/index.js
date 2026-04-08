@@ -26,6 +26,8 @@ const server = http.createServer(app);
 // ✅ CORS CONFIG (FIXED FOR PRODUCTION + RAILWAY)
 // ======================================================
 
+
+
 const FRONTEND_URLS = [
   'http://localhost:5173',
   'http://localhost:5174',
@@ -35,6 +37,45 @@ const FRONTEND_URLS = [
   'https://electricity-billing-production.up.railway.app',
   'https://electricity-billing-production-4c58.up.railway.app'
 ];
+
+
+
+{/*
+const FRONTEND_URLS = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5175',
+  'http://127.0.0.1:5173',
+  'https://electricity-billing.kiaantechnology.com',
+  'https://electricity-billing-production.up.railway.app',
+  'https://electricity-billing-production-4c58.up.railway.app'
+];
+
+*/}
+
+
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // 1. Allow Request with no origin (like Postman)
+    if (!origin) return callback(null, true);
+    // 2. Exact match or Pattern match (Localhost/Railway)
+    const isAllowed = FRONTEND_URLS.includes(origin) || 
+                     origin.startsWith('http://localhost') || 
+                     origin.startsWith('http://127.0.0.1') || 
+                     origin.endsWith('.railway.app');
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      console.error("❌ CORS ERROR: Blocked origin:", origin);
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"]
+}));
+{/*
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -63,6 +104,8 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"]
 }));
 
+
+*/}
 
 
 

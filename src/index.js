@@ -35,8 +35,8 @@ const FRONTEND_URLS = [
   'https://electricity-billing-production.up.railway.app',
   'https://electricity-billing-production-4c58.up.railway.app'
 ];
-{/*
-  app.use(cors({
+
+app.use(cors({
   origin: function (origin, callback) {
     // 1. Allow Request with no origin (like Postman or mobile apps)
     if (!origin) return callback(null, true);
@@ -62,12 +62,8 @@ const FRONTEND_URLS = [
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"]
 }));
-  */}
 
-app.use(cors({
-  origin: true,
-  credentials: true
-}));
+
 
 
 // ✅ VERY IMPORTANT (Preflight fix)

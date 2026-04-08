@@ -30,27 +30,37 @@ const FRONTEND_URLS = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:5175',
+  'http://127.0.0.1:5173',
   'https://electricity-billing.kiaantechnology.com',
   'https://electricity-billing-production.up.railway.app',
   'https://electricity-billing-production-4c58.up.railway.app'
 ];
 
-// 🔥 Dynamic CORS (IMPORTANT)
 app.use(cors({
   origin: function (origin, callback) {
-    // allow requests with no origin (like Postman)
+    // 1. Allow Request with no origin (like Postman or mobile apps)
     if (!origin) return callback(null, true);
 
+    // 2. Exact match check
     if (FRONTEND_URLS.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.log("❌ CORS BLOCKED:", origin);
-      callback(new Error("Not allowed by CORS"));
+      return callback(null, true);
     }
+
+    // 3. Pattern match check for localhost and Railway
+    const isLocal = origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1');
+    const isRailway = origin.endsWith('.railway.app');
+
+    if (isLocal || isRailway) {
+      return callback(null, true);
+    }
+
+    // 4. Fallback: Block unknown origins
+    console.error("❌ CORS ERROR: Request from origin", origin, "is blocked.");
+    return callback(new Error("Not allowed by CORS"), false);
   },
   credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"]
 }));
 
 // ✅ VERY IMPORTANT (Preflight fix)

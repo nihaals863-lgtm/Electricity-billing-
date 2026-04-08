@@ -65,20 +65,7 @@ const FRONTEND_URLS = [
   */}
 
 app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-
-    if (
-      origin.includes("localhost") ||
-      origin.includes("127.0.0.1") ||
-      origin.includes("railway.app") ||
-      origin.includes("kiaantechnology.com")
-    ) {
-      return callback(null, true);
-    }
-
-    return callback(new Error("Not allowed by CORS"));
-  },
+  origin: true,
   credentials: true
 }));
 

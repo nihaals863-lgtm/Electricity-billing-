@@ -69,6 +69,23 @@ app.use(cors({
 // ✅ VERY IMPORTANT (Preflight fix)
 app.options('*', cors());
 
+// 🔥 EXTRA SAFETY HEADERS (As requested)
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (FRONTEND_URLS.includes(origin) || (origin && (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')))) {
+    res.header("Access-Control-Allow-Origin", origin);
+  }
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
+  
+  // Handle preflight
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 // ======================================================
 // ✅ MIDDLEWARE
 // ======================================================

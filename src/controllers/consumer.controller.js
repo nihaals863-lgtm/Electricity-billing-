@@ -101,7 +101,8 @@ const createConsumer = async (req, res) => {
             return res.status(400).json({ success: false, message: 'All fields are required including meter details.' });
         }
 
-        const existingUser = await prisma.user.findUnique({ where: { email } });
+        const normalizedEmail = email.toLowerCase().trim();
+        const existingUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
         if (existingUser) return res.status(400).json({ success: false, message: 'Email already registered.' });
 
         const existingConsumer = await prisma.consumer.findUnique({ where: { meterNumber } });
@@ -149,7 +150,11 @@ const createConsumer = async (req, res) => {
         });
     } catch (error) {
         console.error('createConsumer Error:', error);
-        res.status(500).json({ success: false, message: 'Server error: ' + error.message });
+        if (error.code === 'P2002') {
+            const field = error.meta?.target || 'Information';
+            return res.status(400).json({ success: false, message: `${field} is already in use.` });
+        }
+        res.status(500).json({ success: false, message: 'Failed to create consumer. Please try again later.' });
     }
 };
 
@@ -215,7 +220,10 @@ const updateConsumer = async (req, res) => {
         });
     } catch (error) {
         console.error('updateConsumer Error:', error);
-        res.status(500).json({ success: false, message: 'Server error: ' + error.message });
+        if (error.code === 'P2002') {
+            return res.status(400).json({ success: false, message: 'Email or Meter Number is already in use by another account.' });
+        }
+        res.status(500).json({ success: false, message: 'Failed to update consumer details.' });
     }
 };
 
@@ -294,6 +302,9 @@ const updateMyProfile = async (req, res) => {
         res.status(200).json({ success: true, message: 'Profile updated successfully.' });
     } catch (error) {
         console.error('updateMyProfile Error:', error);
+        if (error.code === 'P2002') {
+            return res.status(400).json({ success: false, message: 'Email already in use.' });
+        }
         res.status(500).json({ success: false, message: 'Server error.' });
     }
 };

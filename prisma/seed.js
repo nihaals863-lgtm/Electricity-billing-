@@ -45,9 +45,9 @@ async function main() {
     const consumerPassword = await bcrypt.hash('consumer123', 10);
 
     for (const c of consumers) {
-        await prisma.user.upsert({
+        const user = await prisma.user.upsert({
             where: { email: c.email },
-            update: { password: consumerPassword }, // 🔥 FORCE RESET PASSWORD
+            update: { password: consumerPassword }, 
             create: {
                 name: c.name,
                 email: c.email,
@@ -63,7 +63,33 @@ async function main() {
                     },
                 },
             },
+            include: { consumer: true }
         });
+
+        // 4. Create METER for live dashboard
+        if (user.consumer) {
+            await prisma.meter.upsert({
+                where: { meterId: c.meter },
+                update: {},
+                create: {
+                    consumerId: user.consumer.id,
+                    meterId: c.meter,
+                    meterName: `Meter ${c.meter}`,
+                    connectionType: 'TCP',
+                    ipAddress: '127.0.0.1',
+                    port: 502,
+                    status: 'Disconnected',
+                    registers: {
+                        create: [
+                            { label: 'Voltage', address: '1', dataType: 'Float' },
+                            { label: 'Current', address: '3', dataType: 'Float' },
+                            { label: 'Power', address: '5', dataType: 'Float' },
+                            { label: 'Energy', address: '7', dataType: 'Float' }
+                        ]
+                    }
+                }
+            });
+        }
     }
 
     console.log('Database seeded successfully!');

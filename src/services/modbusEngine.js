@@ -105,69 +105,91 @@ class ModbusEngine {
         if (this.isPolling) return;
         this.isPolling = true;
         const intervalMs = Number(process.env.POLLING_INTERVAL_MS) || 5000;
-        console.log(`🚀 Starting High-Velocity polling loop (${intervalMs}ms)...`);
+        console.log(`🚀 [MODBUS_ENGINE] Starting polling loop (${intervalMs}ms)...`);
 
-        this.pollingInterval = setInterval(async () => {
+        const poll = async () => {
             try {
                 const meters = await prisma.meter.findMany({
-                    include: { registers: true, consumer: { include: { user: { select: { name: true } } } } }
+                    include: { 
+                        registers: true, 
+                        consumer: { include: { user: { select: { name: true } } } } 
+                    }
                 });
-
-                if (meters.length > 0) console.log(`📡 [SCAN] Scanning ${meters.length} meters...`);
 
                 for (const meter of meters) {
                     try {
                         const data = await this.readMeterData(meter);
+                        
+                        // Check if we got any valid data
                         if (data && Object.keys(data).length > 0) {
-                            // Extract standard normalized values for analytics (DB fields)
+                            console.log(`✅ [${meter.meterId}] Data Received:`, data);
+                            
                             const energyVal = parseFloat(data['Energy'] || data['KWH'] || data['Total Energy'] || data['energy'] || 0);
                             const voltageVal = parseFloat(data['Voltage'] || data['V'] || data['voltage'] || 0);
                             const currentVal = parseFloat(data['Current'] || data['A'] || data['current'] || 0);
                             const powerVal = parseFloat(data['Power'] || data['KW'] || data['power'] || 0);
 
-                            // 1. Persist to Time-Series DB (using original field names)
-                            await prisma.meterReading.create({
-                                data: { 
-                                    meterId: meter.id, 
-                                    energy: energyVal, 
-                                    voltage: voltageVal || null, 
-                                    current: currentVal || null, 
-                                    power: powerVal || null, 
-                                    status: 'Online' 
-                                }
+                            // Update Database: Reading + Status
+                            await Promise.all([
+                                prisma.meterReading.create({
+                                    data: { 
+                                        meterId: meter.id, 
+                                        energy: energyVal, 
+                                        voltage: voltageVal || null, 
+                                        current: currentVal || null, 
+                                        power: powerVal || null, 
+                                        status: 'Online' 
+                                    }
+                                }),
+                                prisma.meter.update({ 
+                                    where: { id: meter.id }, 
+                                    data: { status: 'Active', lastUpdated: new Date() } 
+                                }),
+                                energyVal > 0 ? prisma.consumer.update({ 
+                                    where: { id: meter.consumerId }, 
+                                    data: { lastReading: energyVal } 
+                                }) : Promise.resolve()
+                            ]);
+
+                            console.log(`📡 [${meter.meterId}] Status: Active`);
+
+                            // Emit to UI
+                            if (this.io) {
+                                this.io.emit('meterUpdate', {
+                                    meterId: meter.meterId,
+                                    meterName: meter.meterName,
+                                    consumerName: meter.consumer?.user?.name || 'Unknown',
+                                    ...data,
+                                    status: 'Active',
+                                    lastUpdated: new Date()
+                                });
+                            }
+                        } else {
+                            // No data received from modbus
+                            console.warn(`⚠️ [${meter.meterId}] No data received. Setting status to Failed.`);
+                            await prisma.meter.update({ 
+                                where: { id: meter.id }, 
+                                data: { status: 'Failed', lastUpdated: new Date() } 
                             });
-
-                            // ... master record & consumer updates ...
-                            await prisma.meter.update({ where: { id: meter.id }, data: { status: 'Connected', lastUpdated: new Date() } });
-                            if (energyVal > 0) await prisma.consumer.update({ where: { id: meter.consumerId }, data: { lastReading: energyVal } });
-
-                            // 2. Broadcast Cleaned Data to Frontend (avoid duplicates)
-                            const broadcastData = { ...data };
-                            // Normalize known keys to capitalized versions for UI consistency
-                            if (broadcastData.voltage !== undefined) { broadcastData.Voltage = broadcastData.voltage; delete broadcastData.voltage; }
-                            if (broadcastData.current !== undefined) { broadcastData.Current = broadcastData.current; delete broadcastData.current; }
-                            if (broadcastData.power !== undefined) { broadcastData.Power = broadcastData.power; delete broadcastData.power; }
-                            if (broadcastData.energy !== undefined) { broadcastData.Energy = broadcastData.energy; delete broadcastData.energy; }
-
-                            if (this.io) this.io.emit('meterUpdate', {
-                                meterId: meter.meterId,
-                                meterName: meter.meterName,
-                                consumerName: meter.consumer?.user?.name || 'Unknown',
-                                ...broadcastData,
-                                status: 'Connected',
-                                lastUpdated: new Date()
-                            });
+                            this.io?.emit('meterUpdate', { meterId: meter.meterId, status: 'Failed' });
                         }
                     } catch (err) {
-                        console.error(`🚨 [${meter.meterId}] FAILED:`, err.message);
-                        await prisma.meter.update({ where: { id: meter.id }, data: { status: 'Failed', lastUpdated: new Date() } });
+                        console.error(`🚨 [${meter.meterId}] POLLING_FAILED:`, err.message);
+                        await prisma.meter.update({ 
+                            where: { id: meter.id }, 
+                            data: { status: 'Failed', lastUpdated: new Date() } 
+                        });
                         this.io?.emit('meterUpdate', { meterId: meter.meterId, status: 'Failed' });
                     }
                 }
             } catch (error) {
-                console.error('🔥 Loop Error:', error.message);
+                console.error('🔥 [MODBUS_ENGINE] Critical Loop Error:', error.message);
+            } finally {
+                setTimeout(poll, intervalMs);
             }
-        }, intervalMs);
+        };
+
+        poll();
     }
 }
 

@@ -18,16 +18,22 @@ const login = async (req, res) => {
         }
 
         const normalizedEmail = email.toLowerCase().trim();
+        console.log('🔍 Login attempt for:', normalizedEmail);
+
         const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
 
         if (!user) {
+            console.log('❌ User not found:', normalizedEmail);
             return res.status(401).json({ success: false, message: 'Invalid credentials.' });
         }
 
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
+            console.log('❌ Password mismatch for:', normalizedEmail);
             return res.status(401).json({ success: false, message: 'Invalid credentials.' });
         }
+
+        console.log('✅ Login successful for:', normalizedEmail, 'Role:', user.role);
 
         const token = signToken({ id: user.id, role: user.role, email: user.email });
 
@@ -66,12 +72,12 @@ const getMe = async (req, res) => {
         });
         if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
-        res.status(200).json({ 
-            success: true, 
+        res.status(200).json({
+            success: true,
             user: {
                 ...user,
                 role: user.role.toLowerCase()
-            } 
+            }
         });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Server error.' });
@@ -87,7 +93,7 @@ const updateProfile = async (req, res) => {
         const updateData = {};
 
         if (name) updateData.name = name;
-        if (email) updateData.email = email;
+        if (email) updateData.email = email.toLowerCase().trim();
         if (phoneNumber) updateData.phoneNumber = phoneNumber;
 
         if (password) {
@@ -107,8 +113,9 @@ const updateProfile = async (req, res) => {
             user
         });
     } catch (error) {
-        console.error('💥 updateProfile Error:', error.message);
-        res.status(500).json({ success: false, message: 'Server error: ' + error.message });
+        console.error('💥 updateProfile Error:', error);
+        if (error.code === 'P2002') return res.status(400).json({ success: false, message: 'Email is already taken.' });
+        res.status(500).json({ success: false, message: 'Failed to update profile.' });
     }
 };
 

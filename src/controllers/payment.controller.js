@@ -24,8 +24,8 @@ const processPayment = async (req, res) => {
         const payment = await prisma.$transaction(async (tx) => {
             const p = await tx.payment.create({
                 data: {
-                    billId: Number(billId),
-                    consumerId: consumer.id,
+                    bill: { connect: { id: Number(billId) } },
+                    consumer: { connect: { id: consumer.id } },
                     amount: Number(amount),
                     mode: mode || 'ONLINE',
                     status: 'SUCCESS',
@@ -114,25 +114,39 @@ const getAllPayments = async (req, res) => {
 // ─────────────────────────────────────────
 const recordManualPayment = async (req, res) => {
     try {
-        const { billId, amount, mode, paidAt } = req.body;
+        const { billId: searchParam, amount, mode, paidAt } = req.body;
 
-        if (!billId || !amount) {
-            return res.status(400).json({ success: false, message: 'Bill ID and amount are required.' });
+        if (!searchParam || !amount) {
+            return res.status(400).json({ success: false, message: 'Bill search term (ID/Number) and amount are required.' });
         }
 
-        const bill = await prisma.bill.findUnique({ 
-            where: { id: Number(billId) },
-            include: { consumer: true }
-        });
+        // 1. Resolve Bill: Try ID first, then try billNumber
+        let bill = null;
+        const numericId = Number(searchParam);
         
-        if (!bill) return res.status(404).json({ success: false, message: 'Bill not found.' });
-        if (bill.status === 'PAID') return res.status(400).json({ success: false, message: 'Bill is already paid.' });
+        if (!isNaN(numericId)) {
+            bill = await prisma.bill.findUnique({ 
+                where: { id: numericId },
+                include: { consumer: true }
+            });
+        }
 
+        if (!bill) {
+            bill = await prisma.bill.findUnique({ 
+                where: { billNumber: searchParam },
+                include: { consumer: true }
+            });
+        }
+        
+        if (!bill) return res.status(404).json({ success: false, message: 'Bill not found by ID or Bill Number.' });
+        if (bill.status === 'PAID') return res.status(400).json({ success: false, message: 'This bill is already fully paid.' });
+
+        // 2. Atomic Transaction
         const payment = await prisma.$transaction(async (tx) => {
             const p = await tx.payment.create({
                 data: {
-                    billId: Number(billId),
-                    consumerId: bill.consumerId,
+                    bill: { connect: { id: bill.id } },
+                    consumer: { connect: { id: bill.consumerId } },
                     amount: Number(amount),
                     mode: mode || 'CASH',
                     status: 'SUCCESS',
@@ -141,7 +155,7 @@ const recordManualPayment = async (req, res) => {
             });
 
             await tx.bill.update({
-                where: { id: Number(billId) },
+                where: { id: bill.id },
                 data: { status: 'PAID', updatedAt: new Date() },
             });
 

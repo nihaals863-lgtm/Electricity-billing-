@@ -9,7 +9,7 @@ const calculateBill = async (consumerType, prevReading, currReading) => {
     if (consumerType === 'COMMERCIAL') rate = settings.commercialRate;
     if (consumerType === 'INDUSTRIAL') rate = settings.industrialRate;
 
-    const units = currReading - prevReading;
+    const units = Math.max(0, currReading - prevReading);
     const baseAmount = units * rate;
     const taxAmount = baseAmount * (settings.taxPercent / 100);
     const totalAmount = baseAmount + taxAmount;
@@ -18,7 +18,44 @@ const calculateBill = async (consumerType, prevReading, currReading) => {
 };
 
 // ─────────────────────────────────────────
-// GET /api/bills  (Admin)
+// POST /api/bills/generate-all (Admin)
+// ─────────────────────────────────────────
+const generateAllBills = async (req, res) => {
+    try {
+        const { billMonth, dueDate } = req.body;
+        if (!billMonth || !dueDate) return res.status(400).json({ success: false, message: 'billMonth and dueDate are required.' });
+
+        const consumers = await prisma.consumer.findMany({ include: { user: { select: { id: true, name: true } } } });
+        const results = { created: 0, skipped: 0, errors: 0 };
+
+        for (const consumer of consumers) {
+            try {
+                const existing = await prisma.bill.findFirst({ where: { consumerId: consumer.id, billMonth } });
+                if (existing) { results.skipped++; continue; }
+
+                const prevReading = consumer.lastReading;
+                const { units, baseAmount, taxAmount, totalAmount, ratePerUnit, taxPercent } = await calculateBill(consumer.connectionType, prevReading, prevReading);
+
+                await prisma.bill.create({
+                    data: {
+                        consumer: { connect: { id: consumer.id } },
+                        prevReading,
+                        currReading: prevReading,
+                        units, baseAmount, ratePerUnit, taxPercent, taxAmount, totalAmount,
+                        dueDate: new Date(dueDate), billMonth, status: 'PENDING',
+                    }
+                });
+                results.created++;
+            } catch (err) { results.errors++; }
+        }
+        res.status(200).json({ success: true, message: `Completed. Created: ${results.created}, Skipped: ${results.skipped}`, data: results });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error during generation.' });
+    }
+};
+
+// ─────────────────────────────────────────
+// GET /api/bills (Admin)
 // ─────────────────────────────────────────
 const getAllBills = async (req, res) => {
     try {
@@ -52,43 +89,6 @@ const getAllBills = async (req, res) => {
             generatedBy: b.operator?.user?.name || 'Admin',
             createdAt: b.createdAt,
         }));
-
-        res.status(200).json({ success: true, count: formatted.length, data: formatted });
-    } catch (error) {
-        console.error('getAllBills Error:', error);
-        res.status(500).json({ success: false, message: 'Server error.' });
-    }
-};
-
-// ─────────────────────────────────────────
-// GET /api/bills/my  (Consumer - own bills)
-// ─────────────────────────────────────────
-const getMyBills = async (req, res) => {
-    try {
-        const consumer = await prisma.consumer.findUnique({ where: { userId: req.user.id } });
-        if (!consumer) return res.status(404).json({ success: false, message: 'Consumer not found.' });
-
-        const { status } = req.query;
-        const where = { consumerId: consumer.id };
-        if (status && status !== 'All') where.status = status.toUpperCase();
-
-        const bills = await prisma.bill.findMany({
-            where,
-            orderBy: { createdAt: 'desc' },
-        });
-
-        const formatted = bills.map((b) => ({
-            id: b.id,
-            billNumber: b.billNumber,
-            prevReading: b.prevReading,
-            currReading: b.currReading,
-            units: b.units,
-            amount: b.totalAmount,
-            dueDate: b.dueDate,
-            billMonth: b.billMonth,
-            status: b.status,
-        }));
-
         res.status(200).json({ success: true, data: formatted });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Server error.' });
@@ -96,106 +96,63 @@ const getMyBills = async (req, res) => {
 };
 
 // ─────────────────────────────────────────
-// POST /api/bills/generate  (Admin + Operator)
+// GET /api/bills/my (Consumer)
+// ─────────────────────────────────────────
+const getMyBills = async (req, res) => {
+    try {
+        const consumer = await prisma.consumer.findUnique({ where: { userId: req.user.id } });
+        if (!consumer) return res.status(404).json({ success: false, message: 'Consumer not found.' });
+        const bills = await prisma.bill.findMany({ where: { consumerId: consumer.id }, orderBy: { createdAt: 'desc' } });
+        res.status(200).json({ success: true, data: bills });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error.' });
+    }
+};
+
+// ─────────────────────────────────────────
+// POST /api/bills/generate
 // ─────────────────────────────────────────
 const generateBill = async (req, res) => {
     try {
         const { consumerId, currReading, dueDate, billMonth } = req.body;
-
-        if (!consumerId || !currReading || !dueDate || !billMonth) {
-            return res.status(400).json({ success: false, message: 'All fields are required.' });
+        
+        // Validation: Check for missing or invalid consumerId
+        const parsedConsumerId = parseInt(consumerId);
+        if (isNaN(parsedConsumerId)) {
+            return res.status(400).json({ success: false, message: 'Invalid consumerId. It must be a number.' });
         }
 
-        const consumer = await prisma.consumer.findUnique({
-            where: { id: Number(consumerId) },
-            include: { user: true },
-        });
-
+        const consumer = await prisma.consumer.findUnique({ where: { id: parsedConsumerId } });
         if (!consumer) return res.status(404).json({ success: false, message: 'Consumer not found.' });
 
-        // Check if bill already exists for this consumer and month (Proper logic)
-        const existingBill = await prisma.bill.findFirst({
-            where: { consumerId: Number(consumerId), billMonth }
-        });
+        // Prevent duplicate
+        const existing = await prisma.bill.findFirst({ where: { consumerId: parsedConsumerId, billMonth } });
+        if (existing) return res.status(400).json({ success: false, message: 'Bill already exists for this month.' });
 
-        if (existingBill) {
-            return res.status(400).json({
-                success: false,
-                message: `Bill already generated for ${billMonth}. Duplicate generation prevented.`
-            });
+        const parsedCurrReading = Number(currReading);
+        if (isNaN(parsedCurrReading)) {
+            return res.status(400).json({ success: false, message: 'Invalid current reading. It must be a number.' });
         }
 
-        const prevReading = consumer.lastReading;
-
-        if (Number(currReading) < prevReading) {
-            return res.status(400).json({
-                success: false,
-                message: `Current reading (${currReading}) cannot be less than previous reading (${prevReading}).`,
-            });
-        }
-
-        const { units, baseAmount, taxAmount, totalAmount, ratePerUnit, taxPercent } = await calculateBill(consumer.connectionType, prevReading, Number(currReading));
-
-        // Find operator if role is OPERATOR
-        let operatorId = null;
-        if (req.user.role === 'OPERATOR') {
-            const operator = await prisma.operator.findUnique({ where: { userId: req.user.id } });
-            operatorId = operator?.id || null;
-        }
-
+        const { units, totalAmount, ratePerUnit, taxPercent, baseAmount, taxAmount } = await calculateBill(consumer.connectionType, consumer.lastReading, parsedCurrReading);
+        
         const bill = await prisma.bill.create({
-            data: {
-                consumerId: Number(consumerId),
-                operatorId,
-                prevReading,
-                currReading: Number(currReading),
-                units,
-                baseAmount,
-                ratePerUnit,
-                taxPercent,
-                taxAmount,
-                totalAmount,
-                dueDate: new Date(dueDate),
-                billMonth,
-                status: 'PENDING',
-            },
+            data: { 
+                consumer: { connect: { id: parsedConsumerId } },
+                prevReading: consumer.lastReading, 
+                currReading: parsedCurrReading, 
+                units, baseAmount, ratePerUnit, taxPercent, taxAmount, totalAmount, 
+                dueDate: new Date(dueDate), 
+                billMonth, 
+                status: 'PENDING' 
+            }
         });
-
-        // Update consumer's last reading
-        await prisma.consumer.update({
-            where: { id: Number(consumerId) },
-            data: { lastReading: Number(currReading) },
-        });
-
-        // Trigger Notification
-        await createNotification(
-            consumer.userId,
-            'New Bill Generated ⚡',
-            `Your bill for ${billMonth} has been generated. Amount: ₹${totalAmount.toFixed(2)}. Please pay before ${new Date(dueDate).toLocaleDateString()}.`
-        );
-
-        res.status(201).json({
-            success: true,
-            message: 'Bill generated successfully.',
-            data: {
-                id: bill.id,
-                billNumber: bill.billNumber,
-                consumerName: consumer.user.name,
-                meterNumber: consumer.meterNumber,
-                prevReading: bill.prevReading,
-                currReading: bill.currReading,
-                units: bill.units,
-                baseAmount: bill.baseAmount,
-                taxAmount: bill.taxAmount,
-                totalAmount: bill.totalAmount,
-                dueDate: bill.dueDate,
-                billMonth: bill.billMonth,
-                status: bill.status,
-            },
-        });
+        
+        await prisma.consumer.update({ where: { id: parsedConsumerId }, data: { lastReading: parsedCurrReading } });
+        res.status(201).json({ success: true, message: 'Bill generated.', data: bill });
     } catch (error) {
         console.error('generateBill Error:', error);
-        res.status(500).json({ success: false, message: 'Server error.' });
+        res.status(500).json({ success: false, message: 'Server error: ' + error.message });
     }
 };
 
@@ -204,15 +161,8 @@ const generateBill = async (req, res) => {
 // ─────────────────────────────────────────
 const getBillById = async (req, res) => {
     try {
-        const bill = await prisma.bill.findUnique({
-            where: { id: Number(req.params.id) },
-            include: {
-                consumer: { include: { user: { select: { name: true, email: true } } } },
-            },
-        });
-
+        const bill = await prisma.bill.findUnique({ where: { id: Number(req.params.id) }, include: { consumer: { include: { user: { select: { name: true } } } } } });
         if (!bill) return res.status(404).json({ success: false, message: 'Bill not found.' });
-
         res.status(200).json({ success: true, data: bill });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Server error.' });
@@ -220,121 +170,49 @@ const getBillById = async (req, res) => {
 };
 
 // ─────────────────────────────────────────
-// GET /api/dashboard/stats  (Admin)
+// GET /api/dashboard/stats
 // ─────────────────────────────────────────
 const getDashboardStats = async (req, res) => {
     try {
-        // All queries fire in PARALLEL — no serial round-trips
-        const [
-            totalConsumers,
-            onlineMeters,
-            offlineMeters,
-            totalBills,
-            pendingBills,
-            paidPayments,
-            recentPayments,
-            recentComplaints,
-        ] = await Promise.all([
-            prisma.consumer.count(),
-            prisma.meter.count({ where: { status: 'Connected' } }),
-            prisma.meter.count({ where: { status: { not: 'Connected' } } }),
-
-            prisma.bill.count(),
-
-            prisma.bill.aggregate({
-                where: { status: 'PENDING' },
-                _sum: { totalAmount: true },
-            }),
-
-            prisma.payment.aggregate({
-                where: { status: 'SUCCESS' },
-                _sum: { amount: true },
-            }),
-
-            prisma.payment.findMany({
-                take: 5,
-                orderBy: { paidAt: 'desc' },
-                select: {
-                    id: true,
-                    amount: true,
-                    mode: true,
-                    paidAt: true,
-                    status: true,
-                    consumer: { select: { user: { select: { name: true } } } },
-                },
-            }),
-
-            prisma.complaint.findMany({
-                take: 5,
-                where: { status: 'PENDING' },
-                orderBy: { createdAt: 'desc' },
-                select: {
-                    id: true,
-                    type: true,
-                    status: true,
-                    createdAt: true,
-                    consumer: { select: { user: { select: { name: true } } } },
-                },
-            }),
-        ]);
-
-        // Handle Monthly Revenue grouping in JS for cross-DB compatibility (SQLite/MySQL)
         const sixMonthsAgo = new Date();
         sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-        
-        const paymentsForChart = await prisma.payment.findMany({
-            where: {
-                status: 'SUCCESS',
-                paidAt: { gte: sixMonthsAgo }
-            },
-            select: { amount: true, paidAt: true },
-            orderBy: { paidAt: 'asc' }
-        });
 
-        const revenueMap = {};
-        paymentsForChart.forEach(p => {
-            const month = p.paidAt.toLocaleString('en-US', { month: 'short' });
-            revenueMap[month] = (revenueMap[month] || 0) + p.amount;
-        });
+        const results = await Promise.all([
+            prisma.consumer.count().catch(() => 0),
+            prisma.meter.count({ where: { status: 'Active' } }).catch(() => 0),
+            prisma.meter.count({ where: { status: { not: 'Active' } } }).catch(() => 0),
+            prisma.bill.count().catch(() => 0),
+            prisma.bill.aggregate({ where: { status: 'PENDING' }, _sum: { totalAmount: true } }).catch(() => ({ _sum: { totalAmount: 0 } })),
+            prisma.payment.aggregate({ where: { status: 'SUCCESS' }, _sum: { amount: true } }).catch(() => ({ _sum: { amount: 0 } })),
+            prisma.payment.findMany({ take: 5, orderBy: { paidAt: 'desc' }, include: { consumer: { include: { user: { select: { name: true } } } } } }).catch(() => []),
+            prisma.complaint.findMany({ take: 5, where: { status: 'PENDING' }, orderBy: { createdAt: 'desc' }, include: { consumer: { include: { user: { select: { name: true } } } } } }).catch(() => []),
+            prisma.payment.findMany({ where: { status: 'SUCCESS', paidAt: { gte: sixMonthsAgo } }, select: { amount: true, paidAt: true }, orderBy: { paidAt: 'asc' } }).catch(() => []),
+        ]);
 
-        const monthlyRevenue = Object.entries(revenueMap).map(([name, revenue]) => ({
-            name,
-            revenue: Number(revenue.toFixed(2))
-        }));
+        const [totalConsumers, onlineMeters, offlineMeters, totalBills, pendingBills, paidPayments, recentPaymentsRaw, recentComplaintsRaw, paymentsForChart] = results;
+
+        const monthlyRevenue = paymentsForChart.reduce((acc, p) => {
+            const m = p.paidAt.toLocaleString('en-US', { month: 'short' });
+            const existing = acc.find(x => x.name === m);
+            if (existing) existing.revenue += p.amount;
+            else acc.push({ name: m, revenue: p.amount });
+            return acc;
+        }, []);
 
         res.status(200).json({
             success: true,
             data: {
-                totalConsumers,
-                onlineMeters,
-                offlineMeters,
-                totalMeters: onlineMeters + offlineMeters,
-                totalBills,
-                pendingAmount: Number(pendingBills._sum.totalAmount || 0),
-                paidAmount: Number(paidPayments._sum.amount || 0),
-                recentPayments: recentPayments.map((p) => ({
-                    id: p.id,
-                    consumerName: p.consumer?.user?.name || 'Unknown',
-                    amount: p.amount,
-                    mode: p.mode,
-                    paidAt: p.paidAt,
-                    status: p.status,
-                })),
-                recentComplaints: recentComplaints.map((c) => ({
-                    id: c.id,
-                    consumerName: c.consumer?.user?.name || 'Unknown',
-                    type: c.type,
-                    status: c.status,
-                    createdAt: c.createdAt,
-                })),
-                monthlyRevenue,
+                totalConsumers, onlineMeters, offlineMeters, totalMeters: onlineMeters + offlineMeters, totalBills,
+                pendingAmount: Number(pendingBills?._sum?.totalAmount || 0),
+                paidAmount: Number(paidPayments?._sum?.amount || 0),
+                recentPayments: recentPaymentsRaw.map(p => ({ id: p.id, consumerName: p.consumer?.user?.name || 'Unknown', amount: p.amount, paidAt: p.paidAt, status: p.status })),
+                recentComplaints: recentComplaintsRaw.map(c => ({ id: c.id, consumerName: c.consumer?.user?.name || 'Unknown', type: c.type, createdAt: c.createdAt })),
+                monthlyRevenue
             },
         });
     } catch (error) {
-        console.error('getDashboardStats Error:', error);
-        res.status(500).json({ success: false, message: 'Server error.', error: error.message });
+        res.status(500).json({ success: false, message: 'Server error.' });
     }
 };
 
-
-module.exports = { getAllBills, getMyBills, generateBill, getBillById, getDashboardStats };
+module.exports = { getAllBills, getMyBills, generateBill, generateAllBills, getBillById, getDashboardStats };

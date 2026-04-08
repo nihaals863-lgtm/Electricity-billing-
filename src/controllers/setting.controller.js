@@ -79,7 +79,8 @@ const addTeamMember = async (req, res) => {
     try {
         const { name, email, password, role } = req.body;
         
-        const existing = await prisma.user.findUnique({ where: { email } });
+        const normalizedEmail = email.toLowerCase().trim();
+        const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
         if (existing) return res.status(400).json({ success: false, message: 'Email already exists' });
 
         const hashedPassword = await bcrypt.hash(password, 10);
@@ -87,7 +88,7 @@ const addTeamMember = async (req, res) => {
         const user = await prisma.user.create({
             data: { 
                 name, 
-                email, 
+                email: normalizedEmail, 
                 password: hashedPassword, 
                 role: role.toUpperCase(),
                 ...(role.toUpperCase() === 'OPERATOR' && { operator: { create: {} } })
@@ -96,8 +97,9 @@ const addTeamMember = async (req, res) => {
 
         res.status(201).json({ success: true, message: 'Team member added successfully', data: user });
     } catch (error) {
-        console.error('💥 addTeamMember Error:', error.message);
-        res.status(500).json({ success: false, message: 'Server error: ' + error.message });
+        console.error('💥 addTeamMember Error:', error);
+        if (error.code === 'P2002') return res.status(400).json({ success: false, message: 'Email is already registered.' });
+        res.status(500).json({ success: false, message: 'Internal server error.' });
     }
 };
 

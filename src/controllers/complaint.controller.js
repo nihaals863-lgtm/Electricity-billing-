@@ -28,7 +28,7 @@ const raiseComplaint = async (req, res) => {
 
         const complaint = await prisma.complaint.create({
             data: {
-                consumerId: consumer.id,
+                consumer: { connect: { id: consumer.id } },
                 type,
                 subject,
                 description,

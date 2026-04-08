@@ -48,10 +48,19 @@ const upsertMeter = async (req, res) => {
     try {
         const { id, meterId, meterName, consumerId, connectionType, ipAddress, port, comPort, baudRate, dataBits, parity, stopBits, modbusAddress } = req.body;
         
+        // Validation: consumerId must be a number
+        const parsedConsumerId = parseInt(consumerId);
+        if (isNaN(parsedConsumerId)) {
+            return res.status(400).json({ success: false, message: 'Invalid consumerId. It must be a number.' });
+        }
+
         const data = {
             meterId,
             meterName: meterName || 'New Meter',
-            consumerId: Number(consumerId),
+            // Best Practice: Use relation object for connections if possible, 
+            // but for simple create/update where scalar is present, scalar works.
+            // Using connect ensures Prisma validates the relation exists.
+            consumer: { connect: { id: parsedConsumerId } },
             connectionType,
             ipAddress,
             port: port ? Number(port) : null,
@@ -64,10 +73,14 @@ const upsertMeter = async (req, res) => {
         };
 
         let result;
-        if (id) {
+        if (id && !isNaN(Number(id))) {
             result = await prisma.meter.update({
                 where: { id: Number(id) },
-                data
+                data: {
+                    ...data,
+                    // If updating, we might just want to update the scalar if we don't want to re-connect
+                    // but connect works fine for updates too.
+                }
             });
         } else {
             result = await prisma.meter.create({ data });
@@ -115,7 +128,7 @@ const testConnection = async (req, res) => {
             message = `Connection failed: ${err.message}`;
         }
         
-        const newStatus = isSuccess ? 'Connected' : 'Failed';
+        const newStatus = isSuccess ? 'Active' : 'Failed';
         
         await prisma.meter.update({
             where: { id: Number(id) },
@@ -150,15 +163,27 @@ const getLiveDashboardData = async (req, res) => {
         const dataWithLatest = await Promise.all(meters.map(async (m) => {
             const latestReading = await prisma.meterReading.findFirst({
                 where: { meterId: m.id },
-                orderBy: { createdAt: 'desc' }
+                orderBy: { createdAt: 'desc' },
+                select: { 
+                    energy: true, 
+                    voltage: true, 
+                    current: true, 
+                    power: true,
+                    status: true,
+                    createdAt: true
+                }
             });
 
             return {
-                ...m,
-                ...latestReading, // This will spread voltage, current, energy etc.
-                id: m.id, // Ensure original meter id is kept
+                id: m.id,
                 meterId: m.meterId,
+                meterName: m.meterName,
+                consumerName: m.consumer?.user?.name || 'Unknown',
                 status: m.status,
+                Energy: latestReading?.energy || 0,
+                Voltage: latestReading?.voltage || 0,
+                Current: latestReading?.current || 0,
+                Power: latestReading?.power || 0,
                 lastUpdated: m.lastUpdated || latestReading?.createdAt
             };
         }));

@@ -8,7 +8,6 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const modbusEngine = require('./services/modbusEngine');
-
 const authRoutes = require('./routes/auth.routes');
 const consumerRoutes = require('./routes/consumer.routes');
 const billRoutes = require('./routes/bill.routes');

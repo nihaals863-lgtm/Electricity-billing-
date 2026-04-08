@@ -3,6 +3,7 @@ const {
     getAllBills,
     getMyBills,
     generateBill,
+    generateAllBills,
     getBillById,
     getDashboardStats,
 } = require('../controllers/bill.controller');
@@ -21,6 +22,9 @@ router.get('/my', protect, authorize('CONSUMER'), getMyBills);
 
 // Generate Bill (Admin + Operator)
 router.post('/generate', protect, authorize('ADMIN', 'OPERATOR'), generateBill);
+
+// Bulk Generate (Admin)
+router.post('/generate-all', protect, authorize('ADMIN'), generateAllBills);
 
 // Get Single Bill
 router.get('/:id', protect, getBillById);

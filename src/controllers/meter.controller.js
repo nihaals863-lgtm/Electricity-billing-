@@ -46,21 +46,18 @@ const getAllMeters = async (req, res) => {
 // Create or update meter
 const upsertMeter = async (req, res) => {
     try {
-        const { id, meterId, meterName, consumerId, connectionType, ipAddress, port, comPort, baudRate, dataBits, parity, stopBits, modbusAddress } = req.body;
+        const { id, meterId, meterName, consumerId, connectionType, ipAddress, port, comPort, baudRate, dataBits, parity, stopBits, modbusAddress, pollingInterval, timeout, retries } = req.body;
         
-        // --- PROPER VALIDATION (HARDWARE CHECK) ---
+        // --- OPTIONAL HARDWARE CHECK (INFORMATIONAL ONLY) ---
         const modbusEngine = require('../services/modbusEngine');
         const testResult = await modbusEngine.testConnection({ 
             connectionType, ipAddress, port, comPort, baudRate, modbusAddress 
-        });
+        }).catch(() => ({ success: false, message: 'TEST_SKIPPED' }));
         
+        // We log the result but DON'T block the save. 
+        // Reason: In industrial setups, meters might be on local networks inaccessible to the cloud backend.
         if (!testResult.success) {
-            return res.status(400).json({ 
-                success: false, 
-                message: `CONNECTION_DENIED: ${testResult.message}`,
-                error: testResult.error,
-                diagnostic: testResult.diagnostic
-            });
+            console.warn(`[HW-CHECK] Meter ${ipAddress} validation failed, but allowing save for remote provisioning.`);
         }
 
         const parsedConsumerId = parseInt(consumerId);
@@ -80,7 +77,10 @@ const upsertMeter = async (req, res) => {
             dataBits: dataBits ? Number(dataBits) : 8,
             parity: parity || 'none',
             stopBits: stopBits ? Number(stopBits) : 1,
-            modbusAddress: modbusAddress ? Number(modbusAddress) : 1
+            modbusAddress: modbusAddress ? Number(modbusAddress) : 1,
+            pollingInterval: pollingInterval ? Number(pollingInterval) : 5000,
+            timeout: timeout ? Number(timeout) : 3000,
+            retries: retries ? Number(retries) : 3
         };
 
         let result;
@@ -90,7 +90,20 @@ const upsertMeter = async (req, res) => {
                 data: { ...data }
             });
         } else {
-            result = await prisma.meter.create({ data });
+            // Create new meter with standard industrial registers automatically
+            result = await prisma.meter.create({ 
+                data: {
+                    ...data,
+                    registers: {
+                        create: [
+                            { label: 'Voltage', address: '40001', functionCode: 3, dataType: 'Float', scaling: 1 },
+                            { label: 'Current', address: '40003', functionCode: 3, dataType: 'Float', scaling: 1 },
+                            { label: 'Power', address: '40005', functionCode: 3, dataType: 'Float', scaling: 1 },
+                            { label: 'Energy', address: '40007', functionCode: 3, dataType: 'Float', scaling: 1 }
+                        ]
+                    }
+                } 
+            });
         }
 
         res.status(200).json({ success: true, data: result });
@@ -209,7 +222,8 @@ const updateRegisters = async (req, res) => {
                     label: r.label,
                     address: String(r.address),
                     functionCode: Number(r.functionCode) || 3,
-                    dataType: r.dataType || 'Float'
+                    dataType: r.dataType || 'Float',
+                    scaling: Number(r.scaling) || 1.0
                 }))
             });
         }
@@ -235,31 +249,44 @@ const receiveAgentData = async (req, res) => {
         });
 
         if (meter) {
-            // Log reading
-            await prisma.meterReading.create({
-                data: {
-                    meterId: meter.id,
-                    voltage: Number(voltage),
-                    current: Number(current),
-                    power: Number(power),
-                    energy: Number(energy),
-                    status: status || 'ONLINE'
-                }
-            });
+            const currentStatus = status || 'Active';
 
-            // Update status
+            // Log reading only if it's active data
+            if (currentStatus === 'Active') {
+                await prisma.meterReading.create({
+                    data: {
+                        meterId: meter.id,
+                        voltage: Number(voltage || 0),
+                        current: Number(current || 0),
+                        power: Number(power || 0),
+                        energy: Number(energy || 0),
+                        status: currentStatus
+                    }
+                });
+            }
+            
+            // Update meter status
             await prisma.meter.update({
                 where: { id: meter.id },
-                data: { status: 'ONLINE', lastUpdated: new Date() }
+                data: { status: currentStatus, lastUpdated: new Date() }
+            });
+            
+            // Get consumer name for proper UI update
+            const fullMeter = await prisma.meter.findUnique({
+                where: { id: meter.id },
+                include: { consumer: { include: { user: true } } }
             });
 
             // Emit Live to Frontend (Socket.io)
             if (global.io) {
                 global.io.emit('meterUpdate', {
                     meterId: meter.meterId,
-                    consumerName: meter.consumerName,
-                    voltage, current, power, energy,
-                    status: 'ONLINE'
+                    consumerName: fullMeter.consumer?.user?.name || 'Unknown',
+                    voltage: Number(voltage || 0),
+                    current: Number(current || 0),
+                    power: Number(power || 0),
+                    energy: Number(energy || 0),
+                    status: currentStatus
                 });
             }
         }
@@ -275,6 +302,25 @@ const agentHeartbeat = async (req, res) => {
     const { agentId, status } = req.body;
     console.log(`[HEARTBEAT] ${agentId} is ${status}`);
     res.status(200).json({ success: true });
+};
+
+// Fetch configuration for a specific meter (Used by Agent)
+const getMeterConfig = async (req, res) => {
+    try {
+        const { ipAddress, modbusAddress } = req.query;
+        if (!ipAddress) return res.status(400).json({ success: false, message: 'IP_REQUIRED' });
+
+        const meter = await prisma.meter.findFirst({
+            where: { ipAddress, modbusAddress: Number(modbusAddress) || 1 },
+            include: { registers: true }
+        });
+
+        if (!meter) return res.status(404).json({ success: false, message: 'METER_NOT_FOUND' });
+
+        res.status(200).json({ success: true, data: meter });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
 };
 
 const autoRegisterMeter = async (req, res) => {
@@ -327,6 +373,7 @@ module.exports = {
     updateRegisters,
     receiveAgentData,
     agentHeartbeat,
+    getMeterConfig,
     autoRegisterMeter
 };
 

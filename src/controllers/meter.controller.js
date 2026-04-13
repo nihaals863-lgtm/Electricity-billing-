@@ -48,7 +48,21 @@ const upsertMeter = async (req, res) => {
     try {
         const { id, meterId, meterName, consumerId, connectionType, ipAddress, port, comPort, baudRate, dataBits, parity, stopBits, modbusAddress } = req.body;
         
-        // Validation: consumerId must be a number
+        // --- PROPER VALIDATION (HARDWARE CHECK) ---
+        const modbusEngine = require('../services/modbusEngine');
+        const testResult = await modbusEngine.testConnection({ 
+            connectionType, ipAddress, port, comPort, baudRate, modbusAddress 
+        });
+        
+        if (!testResult.success) {
+            return res.status(400).json({ 
+                success: false, 
+                message: `CONNECTION_DENIED: ${testResult.message}`,
+                error: testResult.error,
+                diagnostic: testResult.diagnostic
+            });
+        }
+
         const parsedConsumerId = parseInt(consumerId);
         if (isNaN(parsedConsumerId)) {
             return res.status(400).json({ success: false, message: 'Invalid consumerId. It must be a number.' });
@@ -57,9 +71,6 @@ const upsertMeter = async (req, res) => {
         const data = {
             meterId,
             meterName: meterName || 'New Meter',
-            // Best Practice: Use relation object for connections if possible, 
-            // but for simple create/update where scalar is present, scalar works.
-            // Using connect ensures Prisma validates the relation exists.
             consumer: { connect: { id: parsedConsumerId } },
             connectionType,
             ipAddress,
@@ -76,11 +87,7 @@ const upsertMeter = async (req, res) => {
         if (id && !isNaN(Number(id))) {
             result = await prisma.meter.update({
                 where: { id: Number(id) },
-                data: {
-                    ...data,
-                    // If updating, we might just want to update the scalar if we don't want to re-connect
-                    // but connect works fine for updates too.
-                }
+                data: { ...data }
             });
         } else {
             result = await prisma.meter.create({ data });
@@ -104,45 +111,33 @@ const deleteMeter = async (req, res) => {
     }
 };
 
-// Test connection (real attempt)
+// Test connection (real attempt BEFORE saving)
 const testConnection = async (req, res) => {
     try {
-        const { id } = req.params;
-        const meter = await prisma.meter.findUnique({ 
-            where: { id: Number(id) },
-            include: { registers: true }
-        });
-
-        if (!meter) return res.status(404).json({ success: false, message: 'Meter not found.' });
-
+        const config = req.body;
         const modbusEngine = require('../services/modbusEngine');
-        let isSuccess = false;
-        let message = 'Connection failed';
         
-        try {
-            const client = await modbusEngine.connectToMeter(meter);
-            isSuccess = !!client;
-            message = 'Connected successfully';
-        } catch (err) {
-            isSuccess = false;
-            message = `Connection failed: ${err.message}`;
-        }
+        const result = await modbusEngine.testConnection(config);
         
-        const newStatus = isSuccess ? 'Active' : 'Failed';
-        
-        await prisma.meter.update({
-            where: { id: Number(id) },
-            data: { status: newStatus, lastUpdated: new Date() }
-        });
-
-        res.status(200).json({ 
-            success: isSuccess, 
-            message: message,
-            status: newStatus
-        });
+        res.status(200).json(result);
     } catch (error) {
         console.error('testConnection Error:', error);
-        res.status(500).json({ success: false, message: 'Server error.' });
+        res.status(500).json({ success: false, message: 'SERVER_ERROR', error: error.message });
+    }
+};
+
+// Get specific meter status
+const getMeterStatus = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const meter = await prisma.meter.findUnique({
+            where: { id: Number(id) },
+            select: { status: true, lastUpdated: true }
+        });
+        if (!meter) return res.status(404).json({ success: false, message: 'METER_NOT_FOUND' });
+        res.status(200).json({ success: true, status: meter.status, lastUpdated: meter.lastUpdated });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'SERVER_ERROR' });
     }
 };
 // Get live dashboard data (API Fallback)
@@ -226,12 +221,112 @@ const updateRegisters = async (req, res) => {
     }
 };
 
+// Edge Agent Ingestion: Handle data from Local PC
+const receiveAgentData = async (req, res) => {
+    try {
+        const { agentId, meterIp, slaveId, voltage, current, power, energy, status } = req.body;
+        
+        // VISUAL PROOF FOR USER
+        console.log(`\x1b[42m\x1b[30m [INBOUND] \x1b[0m \x1b[32m Meter ${meterIp} (Slave ${slaveId}) | V: ${voltage}V | A: ${current}A | P: ${power}kW \x1b[0m`);
+
+        // Find or Create Meter record based on Agent mapping
+        const meter = await prisma.meter.findFirst({
+            where: { ipAddress: meterIp, modbusAddress: Number(slaveId) }
+        });
+
+        if (meter) {
+            // Log reading
+            await prisma.meterReading.create({
+                data: {
+                    meterId: meter.id,
+                    voltage: Number(voltage),
+                    current: Number(current),
+                    power: Number(power),
+                    energy: Number(energy),
+                    status: status || 'ONLINE'
+                }
+            });
+
+            // Update status
+            await prisma.meter.update({
+                where: { id: meter.id },
+                data: { status: 'ONLINE', lastUpdated: new Date() }
+            });
+
+            // Emit Live to Frontend (Socket.io)
+            if (global.io) {
+                global.io.emit('meterUpdate', {
+                    meterId: meter.meterId,
+                    consumerName: meter.consumerName,
+                    voltage, current, power, energy,
+                    status: 'ONLINE'
+                });
+            }
+        }
+
+        res.status(200).json({ success: true });
+    } catch (error) {
+        console.error('receiveAgentData Error:', error.message);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+const agentHeartbeat = async (req, res) => {
+    const { agentId, status } = req.body;
+    console.log(`[HEARTBEAT] ${agentId} is ${status}`);
+    res.status(200).json({ success: true });
+};
+
+const autoRegisterMeter = async (req, res) => {
+    try {
+        const { agentId, ipAddress, modbusAddress, meterName } = req.body;
+        console.log(`\x1b[33m[AUTO-REG] Agent ${agentId} found meter at ${ipAddress}\x1b[0m`);
+
+        // Check if already exists
+        let meter = await prisma.meter.findFirst({
+            where: { ipAddress, modbusAddress: Number(modbusAddress) }
+        });
+
+        if (!meter) {
+            // Check for unassigned consumers to link automatically (Optional logic)
+            const unassignedConsumer = await prisma.consumer.findFirst({
+                where: { meter: null }
+            });
+
+            if (unassignedConsumer) {
+                meter = await prisma.meter.create({
+                    data: {
+                        meterId: `AUTO-${Date.now().toString().slice(-6)}`,
+                        meterName: meterName || 'Auto Discovered',
+                        connectionType: 'TCP',
+                        ipAddress,
+                        port: 502,
+                        modbusAddress: Number(modbusAddress),
+                        consumerId: unassignedConsumer.id,
+                        status: 'ONLINE'
+                    }
+                });
+                console.log(`[AUTO-REG] Linked to Consumer: ${unassignedConsumer.name}`);
+            }
+        }
+
+        res.status(200).json({ success: true, data: meter });
+    } catch (error) {
+        console.error('autoRegisterMeter Error:', error.message);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
 module.exports = {
     getAllMeters,
     upsertMeter,
     deleteMeter,
     testConnection,
+    getMeterStatus,
     getLiveDashboardData,
-    updateRegisters
+    updateRegisters,
+    receiveAgentData,
+    agentHeartbeat,
+    autoRegisterMeter
 };
 

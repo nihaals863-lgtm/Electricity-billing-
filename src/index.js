@@ -4,7 +4,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const dotenv = require('dotenv');
 
-// 💡 Load env FIRST
+// Load env FIRST
 dotenv.config();
 
 const modbusEngine = require('./services/modbusEngine');
@@ -23,78 +23,75 @@ const app = express();
 const server = http.createServer(app);
 
 // ======================================================
-// ✅ 1. CORS CONFIGURATION
+// ALLOWED ORIGINS
 // ======================================================
 
-const FRONTEND_URLS = [
+const ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:5175',
   'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+  'http://127.0.0.1:5175',
   'https://electricity-billing.kiaantechnology.com',
   'https://electricity-billing-production.up.railway.app',
   'https://electricity-billing-production-4c58.up.railway.app'
 ];
 
-app.use(cors({
+// ======================================================
+// CORS — shared instance used for BOTH preflight + requests
+// ======================================================
+
+const corsOptions = cors({
   origin: function (origin, callback) {
-    // allow requests with no origin (like Postman)
     if (!origin) return callback(null, true);
-
-    const isAllowed = FRONTEND_URLS.includes(origin) || 
-                     origin.startsWith('http://localhost') || 
-                     origin.startsWith('http://127.0.0.1') || 
-                     origin.endsWith('.railway.app');
-
+    const isAllowed =
+      ALLOWED_ORIGINS.includes(origin) ||
+      origin.startsWith('http://localhost') ||
+      origin.startsWith('http://127.0.0.1') ||
+      origin.endsWith('.railway.app');
     if (isAllowed) {
       callback(null, true);
     } else {
-      console.error("❌ CORS ERROR: Blocked origin:", origin);
-      callback(new Error("Not allowed by CORS"));
+      console.error('[CORS] Blocked origin:', origin);
+      callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"]
-}));
-
-// ✅ 2. PREFLIGHT & EXTRA SAFETY HEADERS
-app.options('*', cors());
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && (FRONTEND_URLS.includes(origin) || origin.startsWith('http://localhost') || origin.endsWith('.railway.app'))) {
-    res.header("Access-Control-Allow-Origin", origin);
-  }
-  res.header("Access-Control-Allow-Credentials", "true");
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-  
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  optionsSuccessStatus: 200
 });
 
+// Preflight must come FIRST (before auth or any other middleware)
+app.options('*', corsOptions);
+app.use(corsOptions);
+
 // ======================================================
-// ✅ 3. MIDDLEWARE
+// BODY PARSERS
 // ======================================================
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Debug logger
+// ======================================================
+// REQUEST LOGGER
+// ======================================================
+
 app.use((req, res, next) => {
-  console.log(`🌐 ${req.method} ${req.originalUrl} | Origin: ${req.headers.origin}`);
+  console.log('[' + req.method + '] ' + req.originalUrl + ' | Origin: ' + (req.headers.origin || 'No Origin'));
   next();
 });
 
-// Health Checks
-app.get('/', (req, res) => res.status(200).send('PowerBill API Running 🚀'));
+// ======================================================
+// HEALTH CHECKS
+// ======================================================
+
+app.get('/', (req, res) => res.status(200).send('PowerBill API Running'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 // ======================================================
-// ✅ 4. API ROUTES
+// API ROUTES
 // ======================================================
 
 const apiRouter = express.Router();
@@ -110,49 +107,63 @@ apiRouter.use('/meters', meterRoutes);
 apiRouter.use('/reports', reportRoutes);
 
 app.use('/api', apiRouter);
+console.log('[SERVER] API routes loaded');
 
 // ======================================================
-// ✅ 5. SOCKET.IO
+// SOCKET.IO
 // ======================================================
 
 const io = new Server(server, {
   cors: {
-    origin: FRONTEND_URLS,
-    methods: ["GET", "POST"],
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+      const isAllowed =
+        ALLOWED_ORIGINS.includes(origin) ||
+        origin.startsWith('http://localhost') ||
+        origin.startsWith('http://127.0.0.1') ||
+        origin.endsWith('.railway.app');
+      isAllowed ? callback(null, true) : callback(new Error('Socket CORS blocked'));
+    },
+    methods: ['GET', 'POST'],
     credentials: true
   }
 });
 
+// CRITICAL: Make io globally accessible for controllers
+global.io = io;
+
 io.on('connection', (socket) => {
-  console.log('🔌 Socket connected:', socket.id);
-  socket.on('disconnect', () => console.log('❌ Socket disconnected:', socket.id));
+  console.log('[Socket] Connected:', socket.id);
+  socket.on('disconnect', () => console.log('[Socket] Disconnected:', socket.id));
 });
 
 // ======================================================
-// ✅ 6. ERROR HANDLING
+// 404 HANDLER
+// ======================================================
+
+app.use('*', (req, res) => {
+  res.status(404).json({ success: false, message: 'Route not found: ' + req.originalUrl });
+});
+
+// ======================================================
+// GLOBAL ERROR HANDLER
 // ======================================================
 
 app.use((err, req, res, next) => {
-  console.error('💥 ERROR:', err.message);
-  res.status(500).json({ success: false, message: err.message || 'Internal Server Error' });
-});
-
-app.use('*', (req, res) => {
-  res.status(404).json({ success: false, message: `Route not found: ${req.originalUrl}` });
+  const isCors = err.message === 'Not allowed by CORS';
+  const status = isCors ? 403 : 500;
+  console.error('[' + (isCors ? 'CORS' : 'SERVER') + ' ERROR]', err.message);
+  res.status(status).json({ success: false, message: err.message || 'Internal Server Error' });
 });
 
 // ======================================================
-// ✅ 7. START SERVER
+// START SERVER
 // ======================================================
 
 const PORT = process.env.PORT || 5000;
 
-server.listen(PORT, '0.0.0.0', async () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  try {
-    await modbusEngine.init(io);
-    console.log('⚡ Modbus initialized');
-  } catch (err) {
-    console.log('❌ Modbus failed:', err.message);
-  }
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('[SERVER] Running on port ' + PORT);
+  // init() is NOT async — it just schedules polling internally
+  modbusEngine.init(io);
 });
